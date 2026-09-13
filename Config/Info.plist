@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+    <key>CFBundleDisplayName</key><string>觅重</string>
+    <key>CFBundleIconFile</key><string>MiZhong.icns</string>
+    <key>CFBundleIconName</key><string>MiZhong</string>
+    <key>CFBundleExecutable</key><string>MiZhong</string>
+    <key>CFBundleIdentifier</key><string>com.mizhong.desktop</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>觅重</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleSignature</key><string>????</string>
+    <key>CFBundleShortVersionString</key><string>0.5.3</string>
+    <key>CFBundleVersion</key><string>8</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>NSHumanReadableCopyright</key><string>文件仅在本机处理</string>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+</dict>
+</plist>
