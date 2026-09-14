@@ -19,7 +19,7 @@ struct ComparisonView: View {
                             Text(file.url.lastPathComponent).font(.headline).textSelection(.enabled)
                             Text(file.url.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                             Text(file.modifiedAt?.formatted() ?? "修改时间未知").font(.caption)
-                            Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([file.url]) }
+                            Button("在访达中显示") { FinderRevealer.reveal(file.url) }
                         }.padding(12).background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
                     }
                 }

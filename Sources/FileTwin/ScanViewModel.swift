@@ -7,7 +7,6 @@ final class ScanViewModel: ObservableObject {
     @Published var roots: [URL] = []
     @Published var referenceRoots: [URL] = []
     @Published var scanMode: ScanMode = .standard
-    @Published var detectDuplicateFolders = false
     @Published var recursive = true
     @Published var includeHidden = false
     @Published var similarImages = false
@@ -40,7 +39,6 @@ final class ScanViewModel: ObservableObject {
     @Published var activeSessionURL: URL?
     @Published var isRestoredSession = false
     @Published var resultIncludesSimilarImages = false
-    @Published var resultIncludesDuplicateFolders = false
     private var scanner: DuplicateScanner?
     private var scanTask: Task<Void, Never>?
     private var control = ScanControl()
@@ -89,7 +87,6 @@ final class ScanViewModel: ObservableObject {
         var preferredPath: String? = nil
         var mode: ScanMode? = nil
         var referenceRoots: [String]? = nil
-        var detectDuplicateFolders: Bool? = nil
     }
     init() {
         if let data = try? Data(contentsOf: Self.support.appendingPathComponent("settings.json")),
@@ -102,7 +99,6 @@ final class ScanViewModel: ObservableObject {
             preferredDirectory = s.preferredPath.map { URL(fileURLWithPath: $0, isDirectory: true) }
             scanMode = s.mode ?? .standard
             referenceRoots = (s.referenceRoots ?? []).map { URL(fileURLWithPath: $0, isDirectory: true) }
-            detectDuplicateFolders = s.detectDuplicateFolders ?? false
         }
         // Similarity is deliberately opt-in on every launch.
     }
@@ -111,7 +107,7 @@ final class ScanViewModel: ObservableObject {
                          threshold: threshold, extensions: extensions, exclusions: exclusions,
                          protectedPaths: protectedPaths, useCache: useCache, local: localWorkers, network: networkWorkers)
         s.recentRoots = roots.map(\.path); s.shallowPaths = shallowPaths; s.preferredPath = preferredDirectory?.path
-        s.mode = scanMode; s.referenceRoots = referenceRoots.map(\.path); s.detectDuplicateFolders = detectDuplicateFolders
+        s.mode = scanMode; s.referenceRoots = referenceRoots.map(\.path)
         do {
             try FileManager.default.createDirectory(at: Self.support, withIntermediateDirectories: true)
             try JSONEncoder().encode(s).write(to: Self.support.appendingPathComponent("settings.json"), options: .atomic)
@@ -146,7 +142,7 @@ final class ScanViewModel: ObservableObject {
         protectedPaths.union(resultProtectedPaths).union(result?.referencePaths ?? [])
     }
     func isReference(_ url: URL) -> Bool {
-        (result?.referencePaths ?? []).contains { Self.contains(url.standardizedFileURL.path, in: $0) }
+        (result?.referencePaths ?? []).contains { Self.contains(url.path, in: $0) }
     }
     private static func contains(_ path: String, in root: String) -> Bool {
         path == root || path.hasPrefix(root == "/" ? "/" : root + "/")
@@ -197,7 +193,6 @@ final class ScanViewModel: ObservableObject {
         options.localConcurrency = localWorkers; options.networkConcurrency = networkWorkers
         options.mode = scanMode
         options.referencePaths = scanMode == .reference ? Set(referenceRoots.map { $0.standardizedFileURL.path }) : []
-        options.detectDuplicateFolders = detectDuplicateFolders
         let sessionURL = Self.sessionsDirectory.appendingPathComponent(UUID().uuidString + ".json")
         do { try FileManager.default.createDirectory(at: Self.sessionsDirectory, withIntermediateDirectories: true) }
         catch { alertMessage = "无法创建任务记录：\(error.localizedDescription)"; return }
@@ -213,7 +208,6 @@ final class ScanViewModel: ObservableObject {
         result = nil; selectedForTrash = []; searchText = ""; control = ScanControl(); generation = UUID()
         let id = generation, token = control
         resultIncludesSimilarImages = options.similarImages
-        resultIncludesDuplicateFolders = options.detectDuplicateFolders
         let engine = DuplicateScanner(cacheURL: useCache ? Self.support.appendingPathComponent("fingerprints-v2.json") : nil)
         scanner = engine
         progress = .init(phase: .discovering, discovered: 0, processed: 0, currentPath: "")
@@ -286,6 +280,25 @@ final class ScanViewModel: ObservableObject {
             alertMessage = "删除历史任务失败：\(error.localizedDescription)"
         }
     }
+    func extendSession(_ item: SessionHistoryItem) {
+        guard item.mode == .standard, !isScanning, !isCleaning, !isLoadingHistory else { return }
+        let additions = chooseFolder()
+        guard !additions.isEmpty else { return }
+        let destination = Self.sessionsDirectory.appendingPathComponent(UUID().uuidString + ".json")
+        isLoadingHistory = true
+        Task {
+            do {
+                try await Task.detached(priority: .utility) {
+                    try ScanSessionStore.createIncrementalTask(from: item.url, adding: additions, to: destination)
+                }.value
+                isLoadingHistory = false; showHistory = false
+                restoreSession(destination, resume: true)
+            } catch {
+                isLoadingHistory = false
+                alertMessage = "无法创建增量任务：\(error.localizedDescription)"
+            }
+        }
+    }
     func restoreSession(_ url: URL, resume: Bool = false) {
         guard !isScanning, !isCleaning, !isLoadingHistory else { return }
         isLoadingHistory = true
@@ -299,15 +312,14 @@ final class ScanViewModel: ObservableObject {
                 }.value
                 let session = payload.0, options = session.options
                 scanMode = options.mode; referenceRoots = options.referencePaths.sorted().map { URL(fileURLWithPath: $0, isDirectory: true) }
-                roots = session.roots.filter { !options.referencePaths.contains($0.standardizedFileURL.path) }
+                roots = session.roots.filter { !options.referencePaths.contains($0.path) }
                 recursive = options.recursive; includeHidden = options.includeHidden; similarImages = options.similarImages
                 minimumSizeMB = Int(options.minimumFileSize / 1048576)
                 maximumSizeMB = Int((options.maximumFileSize ?? 0) / 1048576)
                 threshold = options.similarityThreshold; extensions = options.extensions.sorted().joined(separator: ", ")
                 exclusions = options.excludedPaths.subtracting([Self.support.path]); shallowPaths = options.nonRecursivePaths
                 localWorkers = options.localConcurrency; networkWorkers = options.networkConcurrency
-                detectDuplicateFolders = options.detectDuplicateFolders
-                resultIncludesSimilarImages = options.similarImages; resultIncludesDuplicateFolders = options.detectDuplicateFolders
+                resultIncludesSimilarImages = options.similarImages
                 activeSessionURL = url
                 resultProtectedPaths = (payload.1?.protectedPaths ?? []).union(options.referencePaths)
                 reviewedSelections = Set((payload.1?.selectedPaths ?? []).map { URL(fileURLWithPath: $0) })
@@ -369,14 +381,17 @@ final class ScanViewModel: ObservableObject {
                 do {
                     for group in result.groups {
                         let targets = Set(group.files.map(\.url)).intersection(selected)
-                        try SafeCleaner.validate(targets, in: group, protectedPaths: protection)
+                        if result.candidateOnly == true { try SafeCleaner.validateCandidates(targets, in: group, protectedPaths: protection) }
+                        else { try SafeCleaner.validate(targets, in: group, protectedPaths: protection) }
                     }
                 } catch { return ["未执行清理：\(error.localizedDescription)"] }
                 for group in result.groups {
                     let targets = Set(group.files.map(\.url)).intersection(selected)
                     guard !targets.isEmpty else { continue }
                     do {
-                        let failures = try SafeCleaner.trash(targets, in: group, protectedPaths: protection)
+                        let failures = result.candidateOnly == true
+                            ? try SafeCleaner.trashCandidates(targets, in: group, protectedPaths: protection)
+                            : try SafeCleaner.trash(targets, in: group, protectedPaths: protection)
                         for url in targets {
                             lines.append("\(url.path)：\(failures[url].map { "失败 " + $0 } ?? "已移至废纸篓")")
                         }

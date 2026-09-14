@@ -3,6 +3,21 @@ import Foundation
 import XCTest
 
 final class SafetyTests: XCTestCase {
+    func testFastCandidateIsFullyVerifiedBeforeAppearingInResults() async throws {
+        let root = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        var first = Data(repeating: 7, count: 400_000), second = first
+        first[100_000] = 1; second[100_000] = 2
+        let a = root.appendingPathComponent("candidate-a.bin"), b = root.appendingPathComponent("candidate-b.bin")
+        try first.write(to: a); try second.write(to: b)
+        let result = await DuplicateScanner().scan(roots: [root], options: .init()) { _ in }
+        XCTAssertEqual(result.candidateOnly, false)
+        XCTAssertFalse(result.groups.contains { group in
+            let paths = Set(group.files.map(\.url.standardizedFileURL.path))
+            return paths.contains(a.standardizedFileURL.path) || paths.contains(b.standardizedFileURL.path)
+        })
+        XCTAssertTrue(FileManager.default.fileExists(atPath: a.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: b.path))
+    }
     func fixture() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("mizhong-test-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

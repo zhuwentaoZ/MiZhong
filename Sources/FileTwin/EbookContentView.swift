@@ -48,7 +48,7 @@ struct EbookContentView: View {
                 }
                 GroupBox {
                     VStack(alignment: .leading, spacing: 6) {
-                        Label("PDF · EPUB · MOBI · AZW3", systemImage: "doc.text")
+                        Label("PDF · EPUB · MOBI · AZW · AZW3", systemImage: "doc.text")
                         Label("NAS 文件只读", systemImage: "lock.shield")
                         Label("不读取或保存密码，不绕过 DRM", systemImage: "key.slash")
                     }.font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
@@ -87,7 +87,7 @@ struct EbookContentView: View {
     private var progressView: some View {
         VStack(spacing: 16) {
             ProgressView().controlSize(.large)
-            Text("正在提取并比较正文").font(.title2.bold())
+            Text(model.phase.isEmpty ? "正在提取并比较正文" : model.phase).font(.title2.bold())
             Text("已处理 \(model.processed) 本电子书").foregroundStyle(.secondary)
             Text(model.currentPath).font(.caption).foregroundStyle(.secondary).lineLimit(2).frame(maxWidth: 560)
         }
@@ -112,16 +112,16 @@ struct EbookContentView: View {
                 ContentUnavailableView("没有发现相似电子书", systemImage: "checkmark.circle", description: Text("可以改用“宽松”匹配后重新分析。"))
             } else {
                 HSplitView {
-                    List(matches, selection: $model.selectedMatch) { match in
+                    List(matches, selection: $model.selectedMatchID) { match in
                         VStack(alignment: .leading, spacing: 6) {
                             HStack { Text(match.classification).font(.headline); Spacer(); Text("\(Int(match.similarity * 100))%").foregroundStyle(.indigo).font(.headline) }
                             Text(match.first.title).lineLimit(1)
                             Text(match.second.title).lineLimit(1)
                             Text("覆盖：\(Int(match.firstCoverage * 100))% / \(Int(match.secondCoverage * 100))%")
                                 .font(.caption).foregroundStyle(.secondary)
-                        }.padding(.vertical, 5).tag(match)
+                        }.padding(.vertical, 5).tag(match.id)
                     }.frame(minWidth: 300, idealWidth: 370)
-                    matchDetail(model.selectedMatch ?? matches.first!)
+                    matchDetail(matches.first(where: { $0.id == model.selectedMatchID }) ?? matches.first!)
                 }
             }
         }
@@ -142,20 +142,20 @@ struct EbookContentView: View {
 
     private func documentsView(_ documents: [EbookDocument]) -> some View {
         HSplitView {
-            List(documents, selection: $model.selectedDocument) { book in
+            List(documents, selection: $model.selectedDocumentID) { book in
                 HStack {
                     Image(systemName: book.state == .ready ? "book.closed" : "exclamationmark.triangle")
                         .foregroundStyle(book.state == .ready ? .indigo : .orange)
-                    VStack(alignment: .leading) { Text(book.title).lineLimit(1); Text("\(book.format.rawValue.uppercased()) · \(formattedFileSize(book.url)) · \(book.characterCount) 字 · \(stateText(book.state))").font(.caption).foregroundStyle(.secondary) }
-                }.tag(book)
+                    VStack(alignment: .leading) { Text(book.title).lineLimit(1); Text("\(book.format.rawValue.uppercased()) · \(formattedFileSize(book)) · \(book.characterCount) 字 · \(stateText(book.state))").font(.caption).foregroundStyle(.secondary) }
+                }.tag(book.id)
             }.frame(minWidth: 310, idealWidth: 380)
-            if let book = model.selectedDocument ?? documents.first {
+            if let book = documents.first(where: { $0.id == model.selectedDocumentID }) ?? documents.first {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text(book.title).font(.title2.bold()); Text("文件大小：\(formattedFileSize(book.url))").font(.caption).foregroundStyle(.secondary); Text(book.url.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    Text(book.title).font(.title2.bold()); Text("文件大小：\(formattedFileSize(book))").font(.caption).foregroundStyle(.secondary); Text(book.url.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     Text(book.detail).font(.caption).foregroundStyle(book.state == .ready ? Color.secondary : Color.orange)
                     Divider()
                     ScrollView { Text(book.text.isEmpty ? "没有可预览的文字。" : book.text).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(.trailing) }
-                    HStack { Spacer(); Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([book.url]) } }
+                    HStack { Spacer(); Button("在访达中显示") { FinderRevealer.reveal(book.url) } }
                 }.padding(16)
             }
         }
@@ -165,7 +165,7 @@ struct EbookContentView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(book.title).font(.headline).lineLimit(2)
             Text(book.format.rawValue.uppercased()).font(.caption.bold()).foregroundStyle(.indigo)
-            Text("文件大小：\(formattedFileSize(book.url))").font(.caption2).foregroundStyle(.secondary)
+            Text("文件大小：\(formattedFileSize(book))").font(.caption2).foregroundStyle(.secondary)
             Text(book.url.path).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
         }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(.background, in: RoundedRectangle(cornerRadius: 10))
     }
@@ -176,8 +176,8 @@ struct EbookContentView: View {
     private func stateText(_ state: EbookExtractionState) -> String {
         switch state { case .ready: "可比较"; case .tooShort: "正文过少"; case .scannedPDF: "可能是扫描版"; case .encrypted: "已加密"; case .unsupported: "不支持"; case .failed: "读取失败" }
     }
-    private func formattedFileSize(_ url: URL) -> String {
-        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize else { return "未知" }
+    private func formattedFileSize(_ book: EbookDocument) -> String {
+        guard let size = book.fileSize else { return "未知" }
         return ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
     }
 }

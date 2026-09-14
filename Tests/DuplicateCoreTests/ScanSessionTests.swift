@@ -5,6 +5,27 @@ import ImageIO
 import XCTest
 
 final class ScanSessionTests: XCTestCase {
+    func testIncrementalTaskAddsRootAndReusesHistoricalRange() async throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let bytes = Data("same content".utf8)
+        _ = try fixture.write("original.bin", bytes)
+        let options = ScanOptions()
+        _ = await DuplicateScanner().scan(roots: [fixture.root], options: options,
+                                           sessionURL: fixture.session) { _ in }
+
+        let added = fixture.parent.appendingPathComponent("added", isDirectory: true)
+        try FileManager.default.createDirectory(at: added, withIntermediateDirectories: true)
+        try bytes.write(to: added.appendingPathComponent("copy.bin"))
+        let incremental = fixture.parent.appendingPathComponent("sessions/incremental.mizhong")
+        try ScanSessionStore.createIncrementalTask(from: fixture.session, adding: [added], to: incremental)
+        let prepared = try ScanSessionStore.load(incremental)
+        XCTAssertEqual(Set(prepared.roots.map(\.path)), Set([fixture.root.path, added.path]))
+
+        let result = await DuplicateScanner().scan(roots: [], options: .init(), sessionURL: incremental,
+                                                    resume: true) { _ in }
+        XCTAssertEqual(result.groups.first?.files.count, 2)
+    }
+
     private struct Fixture {
         let parent: URL
         let root: URL
@@ -136,7 +157,7 @@ final class ScanSessionTests: XCTestCase {
         XCTAssertEqual(try SourceSnapshot(fixture.root), before)
     }
 
-    func testCancelledFullHashPhasePersistsFingerprintsAndResumes() async throws {
+    func testCancelledFingerprintPhaseResumesFastCandidateScan() async throws {
         let fixture = try Fixture(); defer { fixture.remove() }
         let payload = Data(repeating: 37, count: 400_001)
         let a = try fixture.write("a.bin", payload)
@@ -146,20 +167,18 @@ final class ScanSessionTests: XCTestCase {
         let interrupted = await DuplicateScanner().scan(
             roots: [fixture.root], options: .init(), control: control, sessionURL: fixture.session
         ) { update in
-            if update.phase == .hashing { control.cancel() }
+            if update.phase == .fingerprinting { control.cancel() }
         }
         XCTAssertTrue(interrupted.wasCancelled)
         let saved = try ScanSessionStore.load(fixture.session)
         XCTAssertEqual(saved.status, .interrupted)
         XCTAssertEqual(saved.files.count, 2)
-        XCTAssertTrue(saved.files.values.allSatisfy { $0.sample != nil })
 
         let resumed = await DuplicateScanner().scan(
             roots: [fixture.root], options: .init(), sessionURL: fixture.session, resume: true
         ) { _ in }
         XCTAssertFalse(resumed.isIncomplete)
         XCTAssertTrue(resumed.errors.isEmpty, resumed.errors.joined(separator: "\n"))
-        XCTAssertGreaterThan(resumed.cacheHits, 0)
         XCTAssertEqual(duplicatePaths(resumed), [Set([a.path, b.path])])
         XCTAssertEqual(resumed.sessionID, saved.id)
         XCTAssertEqual(try SourceSnapshot(fixture.root), before)
@@ -279,7 +298,7 @@ final class ScanSessionTests: XCTestCase {
         let failed = await DuplicateScanner().scan(
             roots: [fixture.root], options: options, sessionURL: fixture.session
         ) { update in
-            if update.phase == .hashing { mover.perform() }
+            if update.phase == .fingerprinting { mover.perform() }
         }
         XCTAssertTrue(mover.succeeded)
         XCTAssertTrue(failed.isIncomplete)

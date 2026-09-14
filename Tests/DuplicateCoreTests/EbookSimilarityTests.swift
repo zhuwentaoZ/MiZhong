@@ -5,6 +5,44 @@ import Foundation
 import XCTest
 
 final class EbookSimilarityTests: XCTestCase {
+    func testHighFilenameThresholdRequiresSixtyPercentSizeRatio() {
+        let a = URL(fileURLWithPath: "/books/同一本书.epub")
+        let b = URL(fileURLWithPath: "/books/同一本书 副本.epub")
+        let sizes: [String: Int64] = [a.path: 100, b.path: 59]
+        XCTAssertTrue(EbookFilenameSimilarity.compare([a, b], minimum: 0.85, fileSizes: sizes).isEmpty)
+        XCTAssertEqual(EbookFilenameSimilarity.compare([a, b], minimum: 0.80, fileSizes: sizes).count, 1)
+        XCTAssertEqual(EbookFilenameSimilarity.compare([a, b], minimum: 0.85,
+                                                        fileSizes: [a.path: 100, b.path: 60]).count, 1)
+    }
+    func testFilenameMatchesMergeIntoConnectedCandidateGroups() {
+        let a = URL(fileURLWithPath: "/books/A.epub")
+        let b = URL(fileURLWithPath: "/books/B.pdf")
+        let c = URL(fileURLWithPath: "/books/C.mobi")
+        let x = URL(fileURLWithPath: "/books/X.epub")
+        let y = URL(fileURLWithPath: "/books/Y.pdf")
+        let groups = EbookFilenameSimilarity.groups(from: [
+            .init(first: a, second: b, score: 0.9),
+            .init(first: b, second: c, score: 0.8),
+            .init(first: x, second: y, score: 0.7)
+        ])
+        XCTAssertEqual(groups.count, 2)
+        XCTAssertEqual(groups.map { Set($0.files.map(\.path)) }, [Set([a.path, b.path, c.path]), Set([x.path, y.path])])
+        XCTAssertEqual(groups[0].matches.map(\.score), [0.9, 0.8])
+        XCTAssertEqual(groups[0].duplicateBytes(fileSizes: [a.path: 100, b.path: 80, c.path: 60]), 140)
+        XCTAssertNil(groups[0].duplicateBytes(fileSizes: [a.path: 100, b.path: 80]))
+    }
+    func testDocumentAndMatchIdentityDoNotHashFullText() {
+        let url = URL(fileURLWithPath: "/tmp/identity.epub")
+        let first = EbookDocument(url: url, format: .epub, title: "旧标题", text: String(repeating: "甲", count: 100_000))
+        let updated = EbookDocument(url: url, format: .epub, title: "新标题", text: String(repeating: "乙", count: 100_000))
+        XCTAssertEqual(first, updated)
+        XCTAssertEqual(Set([first, updated]).count, 1)
+        let peer = EbookDocument(url: URL(fileURLWithPath: "/tmp/peer.epub"), format: .epub, title: "Peer", text: "正文")
+        let a = EbookMatch(first: first, second: peer, similarity: 0.9, firstCoverage: 0.8, secondCoverage: 0.8, evidence: [])
+        let b = EbookMatch(first: updated, second: peer, similarity: 0.5, firstCoverage: 0.4, secondCoverage: 0.4, evidence: ["变化"])
+        XCTAssertEqual(a, b)
+    }
+
     func testFindsRenamedCrossFormatBookByContent() {
         let repeated = String(repeating: "这是一本用于验证电子书正文相似查找的完整作品。人物沿着河流旅行，并记录每一座城市的故事。", count: 80)
         let first = EbookDocument(url: URL(fileURLWithPath: "/tmp/原书.pdf"), format: .pdf, title: "原书", text: repeated)
@@ -101,6 +139,26 @@ final class EbookSimilarityTests: XCTestCase {
         let book = EbookExtractor.extract(url)
         XCTAssertEqual(book.state, .ready)
         XCTAssertTrue(book.text.contains("content extraction verification"))
+    }
+
+    func testQuickDRMDetectionOnlyChecksMobiFamilyEncryptionField() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let protectedPDF = root.appendingPathComponent("protected.pdf")
+        try Data("%PDF-1.7\n/Encrypt 4 0 R\n%%EOF".utf8).write(to: protectedPDF)
+        XCTAssertEqual(EbookDRMDetector.check(protectedPDF), .unknown)
+
+        var mobi = [UInt8](repeating: 0, count: 112)
+        put32(&mobi, 78, 96); put16(&mobi, 108, 1)
+        let protectedAZW = root.appendingPathComponent("protected.azw")
+        try Data(mobi).write(to: protectedAZW)
+        XCTAssertEqual(EbookDRMDetector.check(protectedAZW), .suspected)
+        put16(&mobi, 108, 0)
+        let plainMOBI = root.appendingPathComponent("plain.mobi")
+        try Data(mobi).write(to: plainMOBI)
+        XCTAssertEqual(EbookDRMDetector.check(plainMOBI), .notDetected)
     }
 
     private func put16(_ bytes: inout [UInt8], _ offset: Int, _ value: UInt16) {

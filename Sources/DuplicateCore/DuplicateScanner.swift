@@ -113,21 +113,22 @@ public actor DuplicateScanner {
             }
         }
         firstPathByIdentity.removeAll(keepingCapacity: false)
+        var verifiedDuplicates: [String: [Work]] = [:]
         if !control.isCancelled {
-            if options.mode == .reference || options.detectDuplicateFolders {
-                _ = await hashes(work, sample: false, options: options, control: control, state: state)
+            if options.mode == .reference {
+                verifiedDuplicates = await hashes(work, sample: false, options: options, control: control, state: state)
             } else {
                 let candidates = Dictionary(grouping: work, by: { $0.file.size }).values.filter { $0.count > 1 }.flatMap { $0 }
                 let sampled = await hashes(candidates, sample: true, options: options, control: control, state: state)
+                let fullCandidates = sampled.values.filter { $0.count > 1 }.flatMap { $0 }
                 if !control.isCancelled {
-                    _ = await hashes(sampled.values.filter { $0.count > 1 }.flatMap { $0 },
-                                     sample: false, options: options, control: control, state: state)
+                    verifiedDuplicates = await hashes(fullCandidates, sample: false, options: options, control: control, state: state)
                 }
             }
         }
         var full: [String: [FileRecord]] = [:]
-        for item in work {
-            if let hash = state.session.files[item.file.id]?.full { full[hash, default: []].append(item.file) }
+        for (hash, items) in verifiedDuplicates where items.count > 1 {
+            full[hash] = items.map(\.file)
         }
         var groups = full.filter { $0.value.count > 1 }.map {
             DuplicateGroup(hash: $0.key, files: $0.value.sorted { $0.id < $1.id })
@@ -168,17 +169,7 @@ public actor DuplicateScanner {
             }
         }
         let contentHashes = state.session.files.compactMapValues(\.full)
-        var folderGroups: [DuplicateFolderGroup] = []
-        if options.detectDuplicateFolders && !control.isCancelled {
-            state.report(.comparingFolders, work.count, 0, "", force: true); state.save(force: true)
-            let incomplete = Set((state.session.blockedDirectories + state.session.pendingDirectories).map { $0.url.path })
-                .union(state.session.failedFiles.map { URL(fileURLWithPath: $0).deletingLastPathComponent().path })
-                .union(state.session.shallowDirectories)
-            folderGroups = LibraryComparison.duplicateFolders(files: state.session.files.values.map(\.file),
-                hashes: contentHashes, directories: state.session.directories.values.map(\.task.url),
-                referencePaths: options.referencePaths, mode: options.mode, control: control,
-                incompleteDirectories: incomplete)
-        }
+        let folderGroups: [DuplicateFolderGroup] = []
         let pending = Set((state.session.pendingDirectories + state.session.blockedDirectories).map { $0.url.path })
             .union(state.session.failedFiles)
         let incomplete = control.isCancelled || !pending.isEmpty
@@ -195,6 +186,7 @@ public actor DuplicateScanner {
                                 errors: state.errors, duration: state.previousElapsed + Date().timeIntervalSince(state.started),
                                 wasCancelled: control.isCancelled, cacheHits: state.cacheHits)
         result.mode = options.mode; result.referencePaths = options.mode == .reference ? options.referencePaths : []
+        result.candidateOnly = false
         result.uniqueFiles = unique; result.duplicateFolderGroups = folderGroups
         result.isIncomplete = incomplete; result.pendingPaths = pending.sorted()
         result.sessionID = sessionURL == nil ? nil : state.session.id
@@ -268,8 +260,9 @@ public actor DuplicateScanner {
         func excluded(_ url: URL) -> Bool {
             options.excludedPaths.contains { ScanSessionStore.within(url.standardizedFileURL.path, $0) }
         }
-        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey,
-            .fileSizeKey, .contentModificationDateKey, .volumeIsLocalKey]
+        // Keep NAS discovery metadata-light. The regular-file stat below already gives us
+        // size and modification time, while volume locality is inherited from the scan root.
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey]
         let oldFiles = Dictionary(grouping: state.session.files.keys, by: { URL(fileURLWithPath: $0).deletingLastPathComponent().path })
         let oldChildDirectories = Dictionary(grouping: state.previousDirectoryPaths, by: {
             URL(fileURLWithPath: $0).deletingLastPathComponent().path
@@ -336,14 +329,19 @@ public actor DuplicateScanner {
                             continue
                         }
                         if state.previousDirectoryPaths.contains(url.path) { discardSubtree(url.path) }
-                        let size = UInt64(max(0, info.fileSize ?? 0))
-                        guard info.isRegularFile == true, accepts(url, size: size, options: options) else {
+                        guard info.isRegularFile == true else {
                             state.session.files.removeValue(forKey: url.path); state.session.failedFiles.remove(url.path); continue
                         }
                         let stamp = try FileStamp.read(url)
+                        let size = UInt64(max(0, stamp.size))
+                        guard accepts(url, size: size, options: options) else {
+                            state.session.files.removeValue(forKey: url.path); state.session.failedFiles.remove(url.path); continue
+                        }
                         let old = state.session.files[url.path]
-                        state.session.files[url.path] = .init(file: .init(url: url, size: UInt64(max(0, stamp.size)),
-                            modifiedAt: info.contentModificationDate, isNetworkVolume: info.volumeIsLocal != true), stamp: stamp,
+                        let modifiedAt = Date(timeIntervalSince1970: TimeInterval(stamp.modified) + TimeInterval(stamp.modifiedNS) / 1_000_000_000)
+                        let isNetwork = state.session.networkRoots.contains { ScanSessionStore.within(url.path, $0) }
+                        state.session.files[url.path] = .init(file: .init(url: url, size: size,
+                            modifiedAt: modifiedAt, isNetworkVolume: isNetwork), stamp: stamp,
                             sample: old?.stamp == stamp ? old?.sample : nil, full: old?.stamp == stamp ? old?.full : nil)
                         if old?.stamp == stamp { state.session.files[url.path]?.imageSignature = old?.imageSignature }
                         state.session.failedFiles.remove(url.path)
@@ -397,7 +395,7 @@ public actor DuplicateScanner {
             let cached = cache[item.file.id]
             let cacheHash = cached?.stamp == item.stamp ? (sample ? cached?.sample : cached?.full) : nil
             if let value = savedHash ?? cacheHash, (try? FileStamp.read(item.file.url)) == item.stamp {
-                if sample { outputs[value, default: []].append(item) }; state.cacheHits += 1; done += 1
+                outputs[value, default: []].append(item); state.cacheHits += 1; done += 1
                 state.remember(item, hash: value, sample: sample); state.save()
             } else { pending.append(item) }
         }
@@ -431,7 +429,7 @@ public actor DuplicateScanner {
                     done += 1
                     let item = answer.work
                     if let hash = answer.hash {
-                        if sample { outputs[hash, default: []].append(item) }; state.remember(item, hash: hash, sample: sample)
+                        outputs[hash, default: []].append(item); state.remember(item, hash: hash, sample: sample)
                         var entry = cache[item.file.id].flatMap { $0.stamp == item.stamp ? $0 : nil } ?? Cached(stamp: item.stamp)
                         if sample { entry.sample = hash; if item.stamp.size <= 196608 { entry.full = hash } }
                         else { entry.full = hash }

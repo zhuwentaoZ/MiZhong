@@ -2,7 +2,7 @@ import Foundation
 import PDFKit
 
 public enum EbookFormat: String, Codable, CaseIterable, Sendable {
-    case pdf, epub, mobi, azw3
+    case pdf, epub, mobi, azw, azw3
 }
 
 public enum EbookExtractionState: String, Codable, Sendable {
@@ -18,10 +18,11 @@ public struct EbookDocument: Identifiable, Hashable, Sendable, Codable {
     public let characterCount: Int
     public let state: EbookExtractionState
     public let detail: String
+    public var fileSize: UInt64?
 
     public init(url: URL, format: EbookFormat, title: String, text: String,
-                state: EbookExtractionState = .ready, detail: String = "") {
-        self.id = url.standardizedFileURL.path
+                state: EbookExtractionState = .ready, detail: String = "", fileSize: UInt64? = nil) {
+        self.id = url.path
         self.url = url
         self.format = format
         self.title = title
@@ -29,7 +30,11 @@ public struct EbookDocument: Identifiable, Hashable, Sendable, Codable {
         self.characterCount = text.count
         self.state = state
         self.detail = detail
+        self.fileSize = fileSize
     }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id }
+    public func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
 public struct EbookMatch: Identifiable, Hashable, Sendable {
@@ -53,6 +58,8 @@ public struct EbookMatch: Identifiable, Hashable, Sendable {
         if similarity >= 0.58 { return "较多重合" }
         return "局部重合"
     }
+    public static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id }
+    public func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
 public struct EbookScanResult: Sendable {
@@ -80,7 +87,7 @@ public enum EbookExtractor {
             switch format {
             case .pdf: return extractPDF(url)
             case .epub: raw = try extractEPUB(url)
-            case .mobi, .azw3: raw = try extractMOBI(url)
+            case .mobi, .azw, .azw3: raw = try extractMOBI(url)
             }
             let text = normalize(raw)
             let state: EbookExtractionState = text.count >= 200 ? .ready : .tooShort
@@ -389,7 +396,7 @@ public enum EbookSimilarityEngine {
 }
 
 public struct EbookScanner: Sendable {
-    private struct Source: Sendable { let url: URL; let isNetwork: Bool }
+    private struct Source: Sendable { let url: URL; let isNetwork: Bool; let size: UInt64; let modifiedAt: Date? }
     private let cacheDirectory: URL?
     public init(cacheDirectory: URL? = nil) { self.cacheDirectory = cacheDirectory }
     public func scan(roots: [URL], recursive: Bool = true, level: EbookSimilarityLevel = .standard,
@@ -398,6 +405,7 @@ public struct EbookScanner: Sendable {
         let started = Date()
         let discovered = await Task.detached(priority: .utility) { Self.discover(roots: roots, recursive: recursive) }.value
         let sources = discovered.0
+        let usableCacheDirectory = cacheDirectory.flatMap { EbookTextCache.isSafeLocal($0) ? $0 : nil }
         var errors = discovered.1
         var ordered = [EbookDocument?](repeating: nil, count: sources.count), processed = 0
         for network in [false, true] where !Task.isCancelled {
@@ -408,9 +416,16 @@ public struct EbookScanner: Sendable {
                 func submit(_ item: (offset: Int, element: Source)) {
                     group.addTask {
                         let url = item.element.url
-                        if let cacheDirectory, let cached = EbookTextCache.load(url: url, directory: cacheDirectory) { return (item.offset, cached) }
-                        let extracted = EbookExtractor.extract(url)
-                        if let cacheDirectory { try? EbookTextCache.save(extracted, source: url, directory: cacheDirectory) }
+                        if let cacheDirectory = usableCacheDirectory, var cached = EbookTextCache.load(url: url, size: item.element.size,
+                                                                                modifiedAt: item.element.modifiedAt,
+                                                                                directory: cacheDirectory) {
+                            cached.fileSize = item.element.size
+                            return (item.offset, cached)
+                        }
+                        var extracted = EbookExtractor.extract(url); extracted.fileSize = item.element.size
+                        if let cacheDirectory = usableCacheDirectory { try? EbookTextCache.save(extracted, source: url, size: item.element.size,
+                                                                         modifiedAt: item.element.modifiedAt,
+                                                                         directory: cacheDirectory) }
                         return (item.offset, extracted)
                     }
                 }
@@ -432,14 +447,17 @@ public struct EbookScanner: Sendable {
     private static func discover(roots: [URL], recursive: Bool) -> ([Source], [String]) {
         var sources: [Source] = [], errors: [String] = []
         for root in roots {
-            let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .isHiddenKey, .volumeIsLocalKey]
+            let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+            let rootIsLocal = (try? root.resourceValues(forKeys: [.volumeIsLocalKey]).volumeIsLocal) ?? true
             guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys,
                 options: recursive ? [.skipsHiddenFiles] : [.skipsHiddenFiles, .skipsSubdirectoryDescendants]) else {
                 errors.append("无法读取：\(root.path)"); continue
             }
             for case let url as URL in enumerator where EbookExtractor.format(for: url) != nil {
-                let local = (try? url.resourceValues(forKeys: [.volumeIsLocalKey]).volumeIsLocal) ?? true
-                sources.append(Source(url: url, isNetwork: !local))
+                guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true,
+                      let rawSize = values.fileSize else { continue }
+                sources.append(Source(url: url, isNetwork: !rootIsLocal, size: UInt64(max(0, rawSize)),
+                                      modifiedAt: values.contentModificationDate))
             }
         }
         return (sources.sorted { $0.url.path < $1.url.path }, errors)
@@ -449,25 +467,19 @@ public struct EbookScanner: Sendable {
 private enum EbookTextCache {
     private struct Entry: Codable { let sourcePath: String; let size: UInt64; let modifiedAt: Date?; let document: EbookDocument }
 
-    static func load(url: URL, directory: URL) -> EbookDocument? {
-        guard isSafeLocal(directory), let metadata = metadata(url) else { return nil }
+    static func load(url: URL, size: UInt64, modifiedAt: Date?, directory: URL) -> EbookDocument? {
         let file = directory.appendingPathComponent(key(url.path)).appendingPathExtension("json")
         guard let data = try? Data(contentsOf: file), let entry = try? JSONDecoder().decode(Entry.self, from: data),
-              entry.sourcePath == url.standardizedFileURL.path, entry.size == metadata.0, entry.modifiedAt == metadata.1 else { return nil }
+              entry.sourcePath == url.path, entry.size == size, entry.modifiedAt == modifiedAt else { return nil }
         return entry.document
     }
-    static func save(_ document: EbookDocument, source: URL, directory: URL) throws {
-        guard isSafeLocal(directory), let metadata = metadata(source) else { return }
+    static func save(_ document: EbookDocument, source: URL, size: UInt64, modifiedAt: Date?, directory: URL) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let entry = Entry(sourcePath: source.standardizedFileURL.path, size: metadata.0, modifiedAt: metadata.1, document: document)
+        let entry = Entry(sourcePath: source.path, size: size, modifiedAt: modifiedAt, document: document)
         try JSONEncoder().encode(entry).write(to: directory.appendingPathComponent(key(source.path)).appendingPathExtension("json"), options: .atomic)
     }
-    private static func metadata(_ url: URL) -> (UInt64, Date?)? {
-        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]), let size = values.fileSize else { return nil }
-        return (UInt64(size), values.contentModificationDate)
-    }
-    private static func isSafeLocal(_ url: URL) -> Bool {
-        let path = url.standardizedFileURL.path
+    static func isSafeLocal(_ url: URL) -> Bool {
+        let path = url.path
         guard path.hasPrefix("/"), !path.hasPrefix("/Volumes/") else { return false }
         var ancestor = url
         while !FileManager.default.fileExists(atPath: ancestor.path), ancestor.path != "/" { ancestor.deleteLastPathComponent() }

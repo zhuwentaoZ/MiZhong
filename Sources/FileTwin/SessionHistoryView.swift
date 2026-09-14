@@ -11,7 +11,7 @@ struct SessionHistoryView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("历史任务").font(.title2.bold())
-                    Text("恢复结果可离线查看；继续任务会先核验变化。")
+                    Text("恢复结果可离线查看；普通查重可新增文件夹并复用历史指纹。")
                         .font(.callout).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -83,9 +83,14 @@ struct SessionHistoryView: View {
                     Label("删除", systemImage: "trash")
                 }
                 Button(item.hasResult ? "查看结果" : "查看任务") { model.restoreSession(item.url) }
-                Button(item.status == .completed ? "核验并继续审核" : "继续任务") {
-                    model.restoreSession(item.url, resume: true)
-                }.buttonStyle(.borderedProminent)
+                if item.mode == .standard {
+                    Button("增量添加文件夹…") { model.extendSession(item) }
+                        .help("复制此历史范围和指纹，加入新文件夹后重新比对")
+                }
+                if item.status != .completed {
+                    Button("继续任务") { model.restoreSession(item.url, resume: true) }
+                        .buttonStyle(.borderedProminent)
+                }
             }
         }
         .padding(15)

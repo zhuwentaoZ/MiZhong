@@ -45,7 +45,6 @@ final class ScanViewModelTests: XCTestCase {
             model.roots = [b]
             model.referenceRoots = [a]
             model.scanMode = .reference
-            model.detectDuplicateFolders = true
             model.extensions = "txt"
             model.useCache = false
             return model
@@ -89,9 +88,7 @@ final class ScanViewModelTests: XCTestCase {
         XCTAssertEqual(result.referencePaths, [fixture.a.path])
         XCTAssertEqual(result.groups.count, 1)
         XCTAssertEqual(Set(result.uniqueFiles.map(\.url)), [fixture.uniqueFile])
-        XCTAssertTrue(result.duplicateFolderGroups.contains {
-            Set($0.folders) == [fixture.aFile.deletingLastPathComponent(), fixture.bFile.deletingLastPathComponent()]
-        })
+        XCTAssertTrue(result.duplicateFolderGroups.isEmpty)
         let aFile = try XCTUnwrap(result.groups.flatMap(\.files).first { $0.url == fixture.aFile })
         let bFile = try XCTUnwrap(result.groups.flatMap(\.files).first { $0.url == fixture.bFile })
         XCTAssertFalse(model.canSelect(aFile))

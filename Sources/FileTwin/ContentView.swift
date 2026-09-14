@@ -37,9 +37,6 @@ struct DuplicateFilesView: View {
                 Divider()
                 Toggle("搜索子目录", isOn: $model.recursive).disabled(model.isScanning || model.isCleaning)
                 Toggle("包含隐藏文件", isOn: $model.includeHidden).disabled(model.isScanning || model.isCleaning)
-                Toggle("识别重复文件夹", isOn: $model.detectDuplicateFolders)
-                    .disabled(model.isScanning || model.isCleaning)
-                    .help("比较文件夹内符合筛选条件的相对路径与文件内容，可能需要读取更多文件。")
                 Toggle("查找相似图片", isOn: $model.similarImages)
                     .disabled(model.isScanning || model.isCleaning)
                     .help("默认关闭。开启后分析常见图片格式。")
@@ -67,6 +64,19 @@ struct DuplicateFilesView: View {
                     .textFieldStyle(.roundedBorder)
                 }
                 .disabled(model.isScanning || model.isCleaning)
+                DisclosureGroup("排除文件夹（\(model.exclusions.count)）") {
+                    VStack(alignment: .leading, spacing: 7) {
+                        ForEach(model.exclusions.sorted(), id: \.self) { path in
+                            HStack {
+                                Text(path).font(.caption2).lineLimit(2)
+                                Spacer()
+                                Button { model.exclusions.remove(path) } label: { Image(systemName: "minus.circle") }
+                                    .buttonStyle(.plain).help("取消排除")
+                            }
+                        }
+                        Button("添加排除文件夹…", systemImage: "folder.badge.minus") { model.addExclusion() }
+                    }.padding(.top, 6)
+                }.disabled(model.isScanning || model.isCleaning)
                 Button("更多设置…", systemImage: "slider.horizontal.3") { showSettings = true }
                     .disabled(model.isScanning || model.isCleaning)
                 Button("历史任务…", systemImage: "clock.arrow.circlepath") {
@@ -218,9 +228,9 @@ struct DuplicateFilesView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 metric("扫描文件", "\(result.scannedFiles)")
-                metric("重复组", "\(result.groups.count)")
+                metric(result.candidateOnly == true ? "候选组" : "重复组", "\(result.groups.count)")
                 if model.resultIncludesSimilarImages { metric("相似图片组", "\(result.similarImageGroups.count)") }
-                metric("重复副本体积", ByteCountFormatter.string(fromByteCount: Int64(result.reclaimableBytes), countStyle: .file))
+                metric(result.candidateOnly == true ? "候选副本体积" : "重复副本体积", ByteCountFormatter.string(fromByteCount: Int64(result.reclaimableBytes), countStyle: .file))
                 metric("耗时", String(format: "%.1f 秒", result.duration))
             }
             HStack {
@@ -229,6 +239,10 @@ struct DuplicateFilesView: View {
                     .foregroundStyle(result.wasCancelled || result.isIncomplete ? .orange : .secondary)
                 Spacer()
                 if !result.errors.isEmpty { Button("查看 \(result.errors.count) 条错误") { model.showErrors = true } }
+            }
+            if result.candidateOnly == true {
+                Label("快速候选 · 扫描仅比较分段指纹；选中本地文件清理时才会完整读取并逐字节验证。", systemImage: "bolt.fill")
+                    .font(.caption).foregroundStyle(.blue)
             }
             if model.isRestoredSession || result.isIncomplete || result.wasCancelled || !result.sessionSaved {
                 HStack(alignment: .top, spacing: 12) {
@@ -247,8 +261,8 @@ struct DuplicateFilesView: View {
                         }
                     }
                     Spacer()
-                    if model.activeSessionURL != nil {
-                        Button(!result.sessionSaved && !model.isRestoredSession ? "从已存检查点继续" : model.isRestoredSession && !result.isIncomplete && !result.wasCancelled ? "核验并恢复审核" : "继续原任务") {
+                    if model.activeSessionURL != nil && !(model.isRestoredSession && !result.isIncomplete && !result.wasCancelled) {
+                        Button(!result.sessionSaved && !model.isRestoredSession ? "从已存检查点继续" : "继续原任务") {
                             model.resumeActiveSession()
                         }.disabled(!model.canResumeSavedTask)
                     }
@@ -259,11 +273,10 @@ struct DuplicateFilesView: View {
                 Button("建议保留一份") { model.autoSelect() }.disabled(!model.canCleanResults || resultMode != 0)
                 Button("清空选择") { model.selectedForTrash = []; model.saveReview() }
             }
-            if model.resultIncludesSimilarImages || model.resultIncludesDuplicateFolders || result.mode == .reference {
+            if model.resultIncludesSimilarImages || result.mode == .reference {
                 Picker("结果类型", selection: $resultMode) {
-                    Text("完全重复 \(result.groups.count)").tag(0)
+                    Text(result.candidateOnly == true ? "重复候选 \(result.groups.count)" : "完全重复 \(result.groups.count)").tag(0)
                     if model.resultIncludesSimilarImages { Text("相似图片 \(result.similarImageGroups.count)").tag(1) }
-                    if model.resultIncludesDuplicateFolders { Text("重复文件夹 \(result.duplicateFolderGroups.count)").tag(2) }
                     if result.mode == .reference { Text("B 中独有 \(result.uniqueFiles.count)").tag(3) }
                 }.pickerStyle(.segmented)
             }
@@ -273,12 +286,10 @@ struct DuplicateFilesView: View {
             }
             if resultMode == 1 && model.resultIncludesSimilarImages {
                 similarImagesView(result)
-            } else if resultMode == 2 && model.resultIncludesDuplicateFolders {
-                duplicateFoldersView(result)
             } else if resultMode == 3 && result.mode == .reference {
                 uniqueFilesView(result)
             } else if result.groups.isEmpty {
-                ContentUnavailableView("没有发现完全重复文件", systemImage: "doc.text.magnifyingglass", description: Text(result.isIncomplete || result.wasCancelled ? "这是部分结果，请继续原任务以完成确认。" : "本次扫描范围内未找到内容完全相同的文件。"))
+                ContentUnavailableView(result.candidateOnly == true ? "没有发现重复候选" : "没有发现完全重复文件", systemImage: "doc.text.magnifyingglass", description: Text(result.isIncomplete || result.wasCancelled ? "这是部分结果，请继续原任务以完成确认。" : "本次扫描范围内未找到相同大小且分段指纹一致的文件。"))
             } else {
                 List(result.groups.filter { group in model.searchText.isEmpty || group.files.contains { $0.id.localizedCaseInsensitiveContains(model.searchText) } }) { group in
                     DisclosureGroup {
@@ -297,11 +308,11 @@ struct DuplicateFilesView: View {
                                 Spacer()
                                 Text(ByteCountFormatter.string(fromByteCount: Int64(file.size), countStyle: .file)).foregroundStyle(.secondary)
                                 Button { preview = file.url } label: { Image(systemName: "eye") }.buttonStyle(.plain)
-                                Button { NSWorkspace.shared.activateFileViewerSelecting([file.url]) } label: { Image(systemName: "folder") }.buttonStyle(.plain)
+                                Button { FinderRevealer.reveal(file.url) } label: { Image(systemName: "folder") }.buttonStyle(.plain).help("在访达中显示")
                             }
                         }
                     } label: {
-                        Text("\(group.files.count) 个副本 · 重复体积 \(ByteCountFormatter.string(fromByteCount: Int64(group.reclaimableBytes), countStyle: .file))")
+                        Text("\(group.files.count) 个\(result.candidateOnly == true ? "候选" : "副本") · \(result.candidateOnly == true ? "候选" : "重复")体积 \(ByteCountFormatter.string(fromByteCount: Int64(group.reclaimableBytes), countStyle: .file))")
                     }
                 }.scrollContentBackground(.hidden)
             }
@@ -314,35 +325,6 @@ struct DuplicateFilesView: View {
             .foregroundStyle(model.isReference(url) ? .green : .blue)
             .padding(.horizontal, 6).padding(.vertical, 2)
             .background((model.isReference(url) ? Color.green : Color.blue).opacity(0.1), in: Capsule())
-    }
-
-    private func duplicateFoldersView(_ result: ScanResult) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("按本次筛选范围内的相对路径与文件内容比较。被排除的文件不参与；此处仅供查看，不提供整夹清理。")
-                .font(.caption).foregroundStyle(.secondary)
-            if result.duplicateFolderGroups.isEmpty {
-                ContentUnavailableView("没有发现重复文件夹", systemImage: "folder.badge.questionmark", description: Text("文件夹需包含相同的相对文件路径与内容。"))
-            } else {
-                List(result.duplicateFolderGroups.filter { group in
-                    model.searchText.isEmpty || group.folders.contains { $0.path.localizedCaseInsensitiveContains(model.searchText) }
-                }) { group in
-                    DisclosureGroup {
-                        ForEach(group.folders, id: \.self) { folder in
-                            HStack {
-                                Image(systemName: "folder").foregroundStyle(.blue)
-                                Text(folder.path).textSelection(.enabled)
-                                if result.mode == .reference { libraryBadge(folder) }
-                                Spacer()
-                                Button { NSWorkspace.shared.activateFileViewerSelecting([folder]) } label: { Image(systemName: "folder.badge.gearshape") }
-                                    .buttonStyle(.plain).help("在 Finder 中显示")
-                            }.padding(.vertical, 4)
-                        }
-                    } label: {
-                        Text("\(group.folders.count) 个文件夹 · 每夹 \(group.fileCount) 个文件 · \(ByteCountFormatter.string(fromByteCount: Int64(group.totalBytes), countStyle: .file))")
-                    }
-                }.scrollContentBackground(.hidden)
-            }
-        }
     }
 
     private func uniqueFilesView(_ result: ScanResult) -> some View {
@@ -364,7 +346,7 @@ struct DuplicateFilesView: View {
                         Spacer()
                         Text(ByteCountFormatter.string(fromByteCount: Int64(file.size), countStyle: .file)).foregroundStyle(.secondary)
                         Button { preview = file.url } label: { Image(systemName: "eye") }.buttonStyle(.plain)
-                        Button { NSWorkspace.shared.activateFileViewerSelecting([file.url]) } label: { Image(systemName: "folder") }.buttonStyle(.plain)
+                        Button { FinderRevealer.reveal(file.url) } label: { Image(systemName: "folder") }.buttonStyle(.plain).help("在访达中显示")
                     }
                 }.scrollContentBackground(.hidden)
             }

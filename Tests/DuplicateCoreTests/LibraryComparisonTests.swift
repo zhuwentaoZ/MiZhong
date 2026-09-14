@@ -104,8 +104,7 @@ final class LibraryComparisonTests: XCTestCase {
         try write("same", to: b.appendingPathComponent("lesson"))
         try write("different A", to: a.appendingPathComponent("sub/only-a"))
         try write("different B", to: b.appendingPathComponent("sub/only-b"))
-        var options = ScanOptions(recursive: false)
-        options.detectDuplicateFolders = true
+        let options = ScanOptions(recursive: false)
         let result = await DuplicateScanner().scan(roots: [a, b], options: options) { _ in }
         XCTAssertFalse(result.groups.isEmpty)
         XCTAssertTrue(result.duplicateFolderGroups.isEmpty, "Unvisited subtrees cannot establish folder equality")
@@ -122,7 +121,7 @@ final class LibraryComparisonTests: XCTestCase {
         try write("same bytes", to: replaced.appendingPathComponent("lesson"))
         try write("same bytes", to: b.appendingPathComponent("lesson"))
         try write("same bytes", to: outside.appendingPathComponent("lesson"))
-        var options = ScanOptions(); options.detectDuplicateFolders = true
+        let options = ScanOptions()
         let first = await DuplicateScanner().scan(roots: [a, b], options: options, sessionURL: session) { _ in }
         XCTAssertEqual(first.groups.count, 1)
         try FileManager.default.removeItem(at: replaced)
@@ -162,7 +161,7 @@ final class LibraryComparisonTests: XCTestCase {
         try write("shared", to: oldFile)
         try write("shared", to: oldDirectory.appendingPathComponent("child"))
         try write("shared", to: unchanged)
-        var options = ScanOptions(); options.detectDuplicateFolders = true
+        let options = ScanOptions()
         _ = await DuplicateScanner().scan(roots: [scan], options: options, sessionURL: session) { _ in }
         try FileManager.default.removeItem(at: oldFile)
         try write("shared", to: oldFile.appendingPathComponent("new-child"))

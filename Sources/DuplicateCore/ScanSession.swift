@@ -137,6 +137,32 @@ public enum ScanSessionStore {
             else { throw StoreError.referenceOverlap }
         }
     }
+    public static func createIncrementalTask(from sourceURL: URL, adding additions: [URL], to destinationURL: URL) throws {
+        let source = try load(sourceURL)
+        guard source.options.mode == .standard else { throw StoreError.invalidOptions }
+        let oldRoots = source.roots.map(\.standardizedFileURL)
+        let newRoots = additions.map(\.standardizedFileURL).filter { candidate in
+            !oldRoots.contains { within(candidate.path, $0.path) || within($0.path, candidate.path) }
+        }
+        guard !newRoots.isEmpty,
+              newRoots.allSatisfy(isLocalPath),
+              newRoots.allSatisfy({ candidate in
+                  !source.options.excludedPaths.contains { within(candidate.path, $0) || within($0, candidate.path) }
+              }) else { throw StoreError.invalidPaths }
+
+        var expanded = ScanSession(roots: oldRoots + newRoots, options: source.options)
+        expanded.files = source.files
+        expanded.directories = source.directories
+        expanded.failedFiles = source.failedFiles
+        expanded.shallowDirectories = source.shallowDirectories
+        expanded.networkRoots = source.networkRoots
+        expanded.pendingDirectories = source.pendingDirectories + source.blockedDirectories
+            + newRoots.map { DirectoryTask(url: $0, recursive: source.options.recursive) }
+        expanded.blockedDirectories = []
+        expanded.status = .running
+        expanded.result = nil
+        try save(expanded, to: destinationURL)
+    }
     static func save(_ session: ScanSession, to url: URL) throws {
         guard isLocalPath(url) else { throw StoreError.invalidPaths }
         let parent = url.deletingLastPathComponent()

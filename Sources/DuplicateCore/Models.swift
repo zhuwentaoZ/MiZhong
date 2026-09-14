@@ -17,7 +17,6 @@ public struct ScanOptions: Sendable, Codable {
     public var retryCount: Int = 2
     public var mode: ScanMode = .standard
     public var referencePaths: Set<String> = []
-    public var detectDuplicateFolders: Bool = false
 
     public init(recursive: Bool = true, includeHidden: Bool = false, similarImages: Bool = false,
                 minimumFileSize: UInt64 = 1, maximumFileSize: UInt64? = nil,
@@ -126,6 +125,7 @@ public struct ScanResult: Sendable, Codable {
     public var pendingPaths: [String] = []
     public var sessionID: UUID? = nil
     public var sessionSaved: Bool = false
+    public var candidateOnly: Bool? = nil
     public var duplicateFiles: Int { groups.reduce(0) { $0 + $1.files.count } }
     public var reclaimableBytes: UInt64 { groups.reduce(0) { $0 + $1.reclaimableBytes } }
 }
